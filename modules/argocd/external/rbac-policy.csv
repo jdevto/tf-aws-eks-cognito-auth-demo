@@ -1,0 +1,85 @@
+# ArgoCD RBAC Policy Configuration
+# Format: p, <role>, <resource>, <action>, <object>, <effect>
+# Group mappings: g, <group>, <role>
+#
+# Resources: applications, clusters, repositories, projects, accounts, certificates, logs, exec, gpgkeys
+# Actions: get, create, update, delete, sync, action/*, * (all actions)
+# Objects: * (all), <project>/* (all in project), <project>/<app> (specific app)
+# Effect: allow, deny
+
+# ==============================================================================
+# role:admin - Full administrative access
+# ==============================================================================
+p, role:admin, applications, *, */*, allow
+p, role:admin, clusters, get, *, allow
+p, role:admin, clusters, create, *, allow
+p, role:admin, clusters, update, *, allow
+p, role:admin, clusters, delete, *, allow
+p, role:admin, repositories, get, *, allow
+p, role:admin, repositories, create, *, allow
+p, role:admin, repositories, update, *, allow
+p, role:admin, repositories, delete, *, allow
+p, role:admin, projects, get, *, allow
+p, role:admin, projects, create, *, allow
+p, role:admin, projects, update, *, allow
+p, role:admin, projects, delete, *, allow
+p, role:admin, accounts, get, *, allow
+p, role:admin, accounts, create, *, allow
+p, role:admin, accounts, update, *, allow
+p, role:admin, accounts, delete, *, allow
+p, role:admin, certificates, get, *, allow
+p, role:admin, certificates, create, *, allow
+p, role:admin, certificates, update, *, allow
+p, role:admin, certificates, delete, *, allow
+p, role:admin, logs, get, *, allow
+p, role:admin, exec, create, *, allow
+p, role:admin, gpgkeys, get, *, allow
+p, role:admin, gpgkeys, create, *, allow
+p, role:admin, gpgkeys, delete, *, allow
+
+# ==============================================================================
+# role:platform - Platform team: Manage clusters, repos, projects (no accounts/certs/gpgkeys)
+# ==============================================================================
+p, role:platform, applications, *, */*, allow
+p, role:platform, clusters, get, *, allow
+p, role:platform, clusters, create, *, allow
+p, role:platform, clusters, update, *, allow
+p, role:platform, clusters, delete, *, allow
+p, role:platform, repositories, get, *, allow
+p, role:platform, repositories, create, *, allow
+p, role:platform, repositories, update, *, allow
+p, role:platform, repositories, delete, *, allow
+p, role:platform, projects, get, *, allow
+p, role:platform, projects, create, *, allow
+p, role:platform, projects, update, *, allow
+p, role:platform, projects, delete, *, allow
+
+# ==============================================================================
+# role:devops - DevOps team: Manage applications only (read-only for clusters/repos/projects)
+# ==============================================================================
+p, role:devops, applications, get, *, allow
+p, role:devops, applications, create, */*, allow
+p, role:devops, applications, update, */*, allow
+p, role:devops, applications, delete, */*, allow
+p, role:devops, applications, sync, */*, allow
+p, role:devops, applications, action/*, */*, allow
+p, role:devops, repositories, get, *, allow
+p, role:devops, projects, get, *, allow
+
+# ==============================================================================
+# role:readonly - Read-only access (can sync applications for viewing)
+# ==============================================================================
+p, role:readonly, applications, get, *, allow
+p, role:readonly, applications, sync, *, allow
+p, role:readonly, clusters, get, *, allow
+p, role:readonly, repositories, get, *, allow
+p, role:readonly, projects, get, *, allow
+p, role:readonly, logs, get, *, allow
+
+# ==============================================================================
+# Cognito Group to ArgoCD Role Mappings
+# ==============================================================================
+g, argocd-admin, role:admin
+g, argocd-platform, role:platform
+g, argocd-devops, role:devops
+g, argocd-auditor, role:readonly

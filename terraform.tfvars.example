@@ -1,0 +1,53 @@
+# Example terraform.tfvars - Copy to terraform.tfvars and fill in your values
+# DO NOT commit terraform.tfvars to version control
+
+domain_name         = "example.com"
+enable_https        = true
+certificate_arn     = "arn:aws:acm:REGION:ACCOUNT_ID:certificate/CERTIFICATE_ID"
+enable_shared_alb   = true
+enable_cognito_auth = true
+
+# Cognito Test Users (optional)
+enable_cognito_test_users = false
+cognito_test_users = [
+  {
+    email     = "test-admin@example.com"
+    username  = "test-admin"
+    group_name = "argocd-admin"
+  },
+  {
+    email     = "test-platform@example.com"
+    username  = "test-platform"
+    group_name = "argocd-platform"
+  },
+  {
+    email     = "test-devops@example.com"
+    username  = "test-devops"
+    group_name = "argocd-devops"
+  },
+  {
+    email     = "test-auditor@example.com"
+    username  = "test-auditor"
+    group_name = "argocd-auditor"
+  }
+]
+
+# AWS Auth ConfigMap - IAM users/roles for Kubernetes access
+aws_auth_map_roles = [
+  {
+    rolearn  = "arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME"
+    username = "username"
+    groups   = ["system:masters"]
+  }
+]
+
+aws_auth_map_users = [
+  {
+    userarn  = "arn:aws:iam::ACCOUNT_ID:user/USER_NAME"
+    username = "username"
+    groups   = ["system:masters"]
+  }
+]
+
+# IP restrictions for shared ALB (optional)
+shared_alb_allowed_ips = ["0.0.0.0/0"]  # Allow all IPs, or specify CIDR blocks
