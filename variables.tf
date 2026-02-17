@@ -6,7 +6,7 @@ variable "region" {
 
 variable "cluster_name" {
   type    = string
-  default = "test"
+  default = "eks-1"
 }
 
 variable "cluster_version" {
@@ -33,12 +33,6 @@ variable "access_entries" {
   default = {}
 }
 
-variable "enable_aws_load_balancer_controller" {
-  description = "Whether to create IAM role for AWS Load Balancer Controller (IRSA)"
-  type        = bool
-  default     = true
-}
-
 variable "domain_name" {
   description = "Domain name"
   type        = string
@@ -51,7 +45,7 @@ variable "enable_https" {
 }
 
 variable "certificate_arn" {
-  description = "ACM certificate ARN for HTTPS. Required when enable_https is true."
+  description = "ACM certificate ARN for Argo CD ingress HTTPS. Leave empty to skip creating ingress with TLS."
   type        = string
   default     = ""
 }
@@ -62,42 +56,8 @@ variable "tags" {
   default     = {}
 }
 
-variable "shared_alb_allowed_ips" {
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-  description = "List of CIDR blocks allowed to access the shared ALB. If empty, all IPs are allowed. Example: [\"1.2.3.4/32\", \"10.0.0.0/8\"]"
-}
-
-variable "enable_cognito_auth" {
-  description = "Enable AWS Cognito authentication for the shared ALB. Requires enable_shared_alb to be true."
-  type        = bool
-  default     = false
-}
-
-variable "cognito_user_pool_name" {
-  description = "Name for the Cognito User Pool. If not provided, will be auto-generated as {cluster_name}-user-pool"
+variable "cognito_user_username" {
+  description = "Username for the Cognito user. If not provided, will be auto-generated as {cluster_name}-user"
   type        = string
   default     = null
-}
-
-variable "cognito_domain_prefix" {
-  description = "Prefix for Cognito hosted UI domain. If not provided, will be auto-generated as {cluster_name}-auth"
-  type        = string
-  default     = null
-}
-
-variable "enable_cognito_test_users" {
-  description = "Enable creation of test users for development/testing. Set to false in production."
-  type        = bool
-  default     = false
-}
-
-variable "cognito_test_users" {
-  description = "List of test users to create in Cognito. Each user must have email, username, and group_name."
-  type = list(object({
-    email      = string
-    username   = string
-    group_name = string
-  }))
-  default = []
 }

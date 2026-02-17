@@ -31,8 +31,10 @@ module "eks" {
 
   endpoint_public_access = true
 
-  access_entries                      = var.access_entries
-  enable_aws_load_balancer_controller = var.enable_aws_load_balancer_controller
+  enable_cluster_creator_admin_permissions = true
+  access_entries                           = var.access_entries
+
+  cloudwatch_log_group_force_destroy = true
 
   addons = {
     coredns = {
@@ -57,6 +59,18 @@ module "eks" {
     }
   }
 
+  # Pod Identity for AWS Load Balancer Controller
+  aws_load_balancer_controller_identity_type = "pod_identity"
+  enable_aws_load_balancer_controller        = true
+  aws_lb_controller_namespace                = "aws-load-balancer-controller"
+  aws_lb_controller_service_account          = "aws-load-balancer-controller"
+
+  # Pod Identity for External DNS
+  external_dns_identity_type   = "pod_identity"
+  enable_external_dns          = true
+  external_dns_namespace       = "external-dns"
+  external_dns_service_account = "external-dns"
+
   eks_managed_node_groups = {
     one = {
       name           = "node-group-1"
@@ -78,101 +92,244 @@ module "eks" {
   depends_on = [module.vpc]
 }
 
-# module "shared_alb" {
-#   source = "./modules/shared-alb"
+module "cognito_user_pool" {
+  source = "tfstack/cognito/aws//modules/user-pool"
 
-#   count = var.enable_shared_alb ? 1 : 0
+  name          = "${var.cluster_name}-userpool"
+  domain_prefix = local.cognito_domain_prefix
+  app_clients   = { "${local.cognito_domain_prefix}" = {} } # optional: empty map = no clients
 
-#   cluster_name                  = local.cluster_name
-#   vpc_id                        = module.vpc.vpc_id
-#   shared_alb_ingress_group_name = "platform"
-#   shared_alb_allowed_ips        = var.shared_alb_allowed_ips
+  user_pool_groups = { # optional: groups (cognito:groups in ID token)
+    "admin"    = { description = "Admins", precedence = 1 }
+    "readonly" = { description = "Read-only", precedence = 2 }
+  }
 
-#   tags = local.common_tags
+  # Argo CD OIDC: callback must be <argocd-base>/auth/callback; logout = base URL
+  callback_urls       = ["${local.argocd_base_url}/auth/callback"]
+  logout_urls         = [local.argocd_base_url]
+  allowed_oauth_flows = ["code"]
 
-#   depends_on = [
-#     module.eks,
-#     module.vpc,
-#     module.cognito
-#   ]
-# }
+  tags = local.common_tags
+}
 
-# module "route53_platform" {
-#   source = "./modules/route53"
+resource "random_password" "demo_user" {
+  count   = var.cognito_user_username != null ? 1 : 0
+  length  = 16
+  special = true
+}
 
-#   count = var.enable_shared_alb ? 1 : 0
+resource "aws_cognito_user" "demo" {
+  count        = var.cognito_user_username != null ? 1 : 0
+  user_pool_id = module.cognito_user_pool.user_pool_id
+  username     = var.cognito_user_username
 
-#   name         = "platform"
-#   domain_name  = var.domain_name
-#   alb_dns_name = module.shared_alb[0].shared_alb_dns_name
-#   alb_zone_id  = module.shared_alb[0].shared_alb_zone_id
+  attributes = {
+    email          = var.cognito_user_username
+    email_verified = "true"
+  }
 
-#   depends_on = [module.shared_alb]
-# }
+  temporary_password = random_password.demo_user[0].result
+  message_action     = "SUPPRESS"
+}
 
-# module "landing_page" {
-#   source = "./modules/landing-page"
+resource "aws_cognito_user_in_group" "demo" {
+  count        = var.cognito_user_username != null ? 1 : 0
+  user_pool_id = module.cognito_user_pool.user_pool_id
+  group_name   = "admin"
+  username     = aws_cognito_user.demo[0].username
+}
 
-#   count = var.enable_shared_alb ? 1 : 0
+# Argo CD bootstrap: namespace + Helm install
+resource "kubernetes_namespace" "argocd" {
+  metadata {
+    name   = "argocd"
+    labels = { name = "argocd" }
+  }
+  depends_on = [module.eks]
+}
 
-#   subnet_ids                    = module.vpc.public_subnet_ids
-#   shared_alb_ingress_group_name = module.shared_alb[0].shared_alb_ingress_group_name
-#   shared_alb_security_group_id  = module.shared_alb[0].shared_alb_security_group_id
-#   enable_https                  = var.enable_https
-#   certificate_arn               = var.enable_https ? var.certificate_arn : ""
-#   ssl_redirect                  = var.enable_https
-#   argocd_path_prefix            = "/argocd"
+resource "helm_release" "argocd" {
+  name             = "argo-cd"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  version          = "9.4.1"
+  namespace        = kubernetes_namespace.argocd.metadata[0].name
+  create_namespace = false
+  values = [
+    yamlencode({
+      configs = {
+        params = {
+          "server.insecure" = "true"
+          "server.url"      = "https://${local.argocd_host}"
+        }
+        cm = merge(
+          {
+            url = "https://${local.argocd_host}"
+          },
+          {
+            "oidc.config" = <<-EOT
+              name: Cognito
+              issuer: https://${module.cognito_user_pool.user_pool_endpoint}
+              clientId: ${module.cognito_user_pool.client_ids[local.cognito_domain_prefix]}
+              requestedScopes: ["openid", "profile", "email"]
+              groupsClaim: "cognito:groups"
+              logoutURL: "https://${module.cognito_user_pool.domain_name}.auth.${var.region}.amazoncognito.com/logout?client_id=${module.cognito_user_pool.client_ids[local.cognito_domain_prefix]}&logout_uri=${urlencode(local.argocd_base_url)}"
+            EOT
+          }
+        )
+        rbac = {
+          "policy.default" = "role:readonly"
+          "policy.csv"     = "g, argocd-admins, role:admin\ng, argocd-developers, role:readonly"
+          scopes           = "[cognito:groups, email]"
+        }
+      }
+    })
+  ]
 
-#   depends_on = [
-#     module.eks,
-#     module.vpc,
-#     module.shared_alb
-#   ]
-# }
+  depends_on = [kubernetes_namespace.argocd]
+}
 
-# module "cognito" {
-#   source = "./modules/cognito"
+# External DNS: deployed by Argo CD (Application)
+resource "kubernetes_manifest" "argocd_application_external_dns" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "external-dns"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = "https://kubernetes-sigs.github.io/external-dns/"
+        chart          = "external-dns"
+        targetRevision = "1.20.0"
+        helm = {
+          values = <<-EOT
+            provider:
+              name: aws
+            serviceAccount:
+              create: true
+            policy: sync
+            logLevel: info
+            logFormat: json
+            txtOwnerId: ${var.cluster_name}
+            domainFilters:
+              - ${var.domain_name}
+            extraArgs:
+              aws-zone-type: public
+            env:
+              - name: AWS_DEFAULT_REGION
+                value: ${var.region}
+          EOT
+        }
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "external-dns"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = ["CreateNamespace=true"]
+      }
+    }
+  }
+  depends_on = [helm_release.argocd]
+}
 
-#   count = var.enable_shared_alb && var.enable_cognito_auth ? 1 : 0
+# AWS Load Balancer Controller: deployed by Argo CD (Application)
+resource "kubernetes_manifest" "argocd_application_aws_load_balancer_controller" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "aws-load-balancer-controller"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = "https://aws.github.io/eks-charts"
+        chart          = "aws-load-balancer-controller"
+        targetRevision = "3.0.0"
+        helm = {
+          values = <<-EOT
+            clusterName: ${var.cluster_name}
+            serviceAccount:
+              create: true
+            region: ${var.region}
+            vpcId: ${module.vpc.vpc_id}
+            createIngressClassResource: true
+            ingressClass: alb
+            enableServiceMutatorWebhook: false
+            enableShield: false
+            enableWaf: false
+            enableWafv2: false
+          EOT
+        }
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "aws-load-balancer-controller"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = ["CreateNamespace=true"]
+      }
+    }
+  }
+  depends_on = [helm_release.argocd]
+}
 
-#   cluster_name       = local.cluster_name
-#   domain_name        = var.domain_name
-#   platform_subdomain = "platform"
-#   user_pool_name     = var.cognito_user_pool_name
-#   domain_prefix      = var.cognito_domain_prefix
-#   argocd_path_prefix = "/argocd"
-#   tags               = local.common_tags
+# Argo CD ingress (config is in helm_release values above)
+resource "kubernetes_ingress_v1" "argocd_server" {
+  count = var.certificate_arn != "" ? 1 : 0
 
-#   depends_on = [module.vpc]
-# }
-
-# # ArgoCD Module
-# module "argocd" {
-#   source = "./modules/argocd"
-
-#   aws_region                    = var.region
-#   cluster_name                  = module.eks.cluster_name
-#   subnet_ids                    = module.vpc.public_subnet_ids
-#   enable_https                  = var.enable_https
-#   certificate_arn               = var.certificate_arn
-#   ssl_redirect                  = var.enable_https
-#   shared_alb_ingress_group_name = module.shared_alb[0].shared_alb_ingress_group_name
-#   shared_alb_security_group_id  = module.shared_alb[0].shared_alb_security_group_id
-#   platform_domain               = "platform.${var.domain_name}"
-
-#   enable_cognito_oidc             = var.enable_shared_alb && var.enable_cognito_auth
-#   cognito_user_pool_id            = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_id : ""
-#   cognito_user_pool_client_id     = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_client_id : ""
-#   cognito_user_pool_client_secret = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_client_secret : ""
-#   cognito_oidc_issuer_url         = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].oidc_issuer_url : ""
-#   cognito_user_pool_arn           = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_arn : ""
-#   cognito_user_pool_domain        = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_domain : ""
-#   cognito_user_pool_domain_url    = var.enable_shared_alb && var.enable_cognito_auth ? module.cognito[0].user_pool_domain_url : ""
-
-#   depends_on = [
-#     module.eks,
-#     module.vpc,
-#     module.shared_alb,
-#     module.cognito
-#   ]
-# }
+  metadata {
+    name      = "argocd-server-ingress"
+    namespace = kubernetes_namespace.argocd.metadata[0].name
+    annotations = {
+      "alb.ingress.kubernetes.io/group.name"                   = "default-public-ingress"
+      "alb.ingress.kubernetes.io/scheme"                       = "internet-facing"
+      "alb.ingress.kubernetes.io/target-type"                  = "ip"
+      "alb.ingress.kubernetes.io/listen-ports"                 = "[{\"HTTP\": 80}, {\"HTTPS\": 443}]"
+      "alb.ingress.kubernetes.io/ssl-redirect"                 = "443"
+      "alb.ingress.kubernetes.io/certificate-arn"              = var.certificate_arn
+      "external-dns.alpha.kubernetes.io/hostname"              = local.argocd_host
+      "alb.ingress.kubernetes.io/healthcheck-path"             = "/healthz"
+      "alb.ingress.kubernetes.io/healthcheck-protocol"         = "HTTP"
+      "alb.ingress.kubernetes.io/healthcheck-interval-seconds" = "15"
+      "alb.ingress.kubernetes.io/healthcheck-timeout-seconds"  = "5"
+      "alb.ingress.kubernetes.io/healthy-threshold-count"      = "2"
+      "alb.ingress.kubernetes.io/unhealthy-threshold-count"    = "2"
+      "alb.ingress.kubernetes.io/healthcheck-matcher"          = "200-399"
+    }
+  }
+  spec {
+    ingress_class_name = "alb"
+    rule {
+      host = local.argocd_host
+      http {
+        path {
+          path      = "/"
+          path_type = "Prefix"
+          backend {
+            service {
+              name = "argo-cd-argocd-server"
+              port {
+                number = 80
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  depends_on = [helm_release.argocd]
+}
